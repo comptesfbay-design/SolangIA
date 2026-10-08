@@ -121,7 +121,11 @@ Dans le terminal : `npm.cmd test`. Ces tests vérifient :
 - La date d'une photo est celle de son ajout dans l'app, pas celle de la prise de vue.
 - Un PDF de plusieurs pages peut s'afficher incomplètement dans l'app. Dans ce cas, touche 📤 pour l'ouvrir ailleurs (Fichiers, Livres).
 
+**Nouveau en 0.2.1 :** dans une pièce, **🧱 Choisir les lots de la pièce** affiche tous les lots sous forme de cases à cocher. Décoche ceux qui ne servent pas (ex. Plomberie dans l'escalier), puis touche **Appliquer**. Une copie de sécurité est faite avant, et tu peux recocher un lot plus tard pour le remettre.
+
 ### Checklist de test V1
+
+> Les 17 tests de la V0 ont été déroulés automatiquement sur PC (18/18 réussis, avec le choix des lots). Sur iPhone, il reste à vérifier : l'installation depuis Safari, l'appareil photo, le mode avion, la lisibilité au soleil et avec des gants, et l'état du « stockage persistant ».
 
 1. [ ] À l'ouverture, toucher **Mettre à jour** sur le bandeau. Réglages → Application doit afficher **0.2.0**. Tes tâches cochées sont toujours là, et une copie « Avant mise à jour de la base (v1 → v2) » apparaît dans Copies de sécurité.
 2. [ ] Ouvrir une tâche → **Sous-tâches** : en ajouter 2. Les cocher toutes les deux, puis fermer : la tâche principale est cochée, et les sous-tâches apparaissent en retrait dans la pièce.
@@ -156,7 +160,7 @@ Le changement d'ordre des **tâches** n'est pas encore possible (seuls les nivea
 6. [ ] Toucher le texte d'une tâche : la fiche s'ouvre. Écrire un commentaire, Enregistrer : l'icône 💬 apparaît.
 7. [ ] Ajouter une tâche avec le champ « Nouvelle tâche… » en haut d'un lot.
 8. [ ] Choisir « Finition peinture : B », revenir à l'accueil : le badge « Finition B » apparaît à côté de la pièce.
-9. [ ] Dans une pièce : « + Ajouter un lot » → « VMC ». Puis « Catégorie libre… » → « Menuiseries extérieures ».
+9. [ ] Dans une pièce : « 🧱 Choisir les lots de la pièce » → cocher « VMC » → Appliquer. Puis « Créer une catégorie libre… » → « Menuiseries extérieures ».
 10. [ ] « Copier la structure vers une autre pièce » → choisir une chambre, puis vérifier que les lots ajoutés y sont.
 11. [ ] Accueil → **Organiser** : déplacer une pièce (↑ ↓), renommer un niveau, ajouter une pièce dans « Combles ».
 12. [ ] Supprimer une pièce, puis aller dans Réglages → Copies de sécurité → **Restaurer** : la pièce revient.

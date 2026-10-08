@@ -205,6 +205,8 @@ textarea.field { resize: vertical; }
 .inline-field .field { width: auto; min-width: 110px; }
 .check-line { display: flex; align-items: center; gap: 12px; min-height: var(--tap); margin: 8px 0; font-weight: 600; }
 .chk { width: 26px; height: 26px; flex: none; accent-color: var(--accent); }
+.block { display: block; }
+.check-line small { font-weight: 400; }
 
 .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .segmented.three { grid-template-columns: repeat(3, 1fr); }

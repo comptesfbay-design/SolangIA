@@ -312,7 +312,7 @@ async function viewRoom(id) {
       sortedLots.map((lot) => lotSection(lot, tasksByLot[lot.id] ?? [], sortedLots, lot === firstUnfinished, photosByTask)),
       lots.length ? null : h('p', { class: 'card muted' }, 'Aucun lot dans cette pièce.'),
       h('div', { class: 'stack' },
-        h('button', { class: 'btn block', onclick: () => addLotToRoom(room, lots, catalogue) }, '+ Ajouter un lot'),
+        h('button', { class: 'btn block', onclick: () => manageLots(room, lots, tasks, photos, catalogue) }, '🧱 Choisir les lots de la pièce'),
         h('button', { class: 'btn block', onclick: () => copyRoomStructure(room, lots, tasks) }, '⧉ Copier la structure vers une autre pièce')),
       roomPhotosSection(room, photos, tasks),
       attachmentsSection(room, files),
@@ -592,40 +592,89 @@ async function lotMenu(lot, sortedLots, tasks) {
   refresh();
 }
 
-async function addLotToRoom(room, lots, catalogue) {
-  const present = new Set(lots.map((l) => l.templateKey).filter(Boolean));
-  const value = await choose({
-    title: 'Ajouter un lot',
-    options: [
-      ...catalogue.map((e) => ({
-        label: e.name, value: e.key, disabled: present.has(e.key),
-        hint: present.has(e.key) ? 'déjà dans la pièce' : `${e.tasks.length} tâche(s) proposée(s)`,
-      })),
-      { label: '✚  Catégorie libre…', value: '__free', hint: 'un lot vide, avec le nom de votre choix' },
-    ],
-  });
-  if (!value) return;
-  if (value === '__free') {
-    const name = await askText({ title: 'Nouvelle catégorie', label: 'Nom (ex. VMC, Menuiseries…)' });
-    if (!name) return;
-    const addToCatalogue = await confirmBox({
-      title: 'Modèle de lots',
-      message: `Ajouter aussi « ${name} » au modèle de lots, pour pouvoir l’utiliser dans d’autres pièces ?`,
-      ok: 'Oui, ajouter', cancel: 'Non, ici seulement',
+// Cases à cocher : cocher = lot présent dans la pièce, décocher = lot retiré.
+async function manageLots(room, lots, tasks, photos, catalogue) {
+  const known = new Set(catalogue.map((e) => e.key));
+  const byKey = new Map(lots.filter((l) => l.templateKey).map((l) => [l.templateKey, l]));
+  const rows = [
+    ...catalogue.map((e) => ({ name: e.name, entry: e, lot: byKey.get(e.key) ?? null })),
+    ...sortByOrder(lots.filter((l) => !known.has(l.templateKey))).map((l) => ({ name: l.name, entry: null, lot: l })),
+  ];
+  const res = await sheet('Lots de la pièce', (close) => {
+    const boxes = rows.map((r) => {
+      const cb = h('input', { type: 'checkbox', class: 'chk', checked: !!r.lot });
+      const p = r.lot ? progress(tasks.filter((t) => t.lotId === r.lot.id)) : null;
+      const hint = p ? `dans la pièce · ${p.done}/${p.total} faite(s)` : `${r.entry.tasks.length} tâche(s) proposée(s)`;
+      return { r, cb, row: h('label', { class: 'check-line' }, cb, h('span', { class: 'grow' }, r.name, h('small', { class: 'muted block' }, hint))) };
     });
-    let templateKey = null;
-    if (addToCatalogue) {
-      templateKey = uid();
-      await db.setMeta('catalogue', [...catalogue, { key: templateKey, name, auto: false, tasks: [] }]);
-    }
-    const lot = newLot({ roomId: room.id, name, templateKey, order: nextOrder(lots) });
-    await db.put('lots', lot);
-    ui.openLots.set(lot.id, true);
-  } else {
-    const s = lotFromTemplate(room.id, catalogue.find((e) => e.key === value), nextOrder(lots));
-    await db.write([{ store: 'lots', put: s.lot }, ...db.putOps('tasks', s.tasks)]);
+    return [
+      h('p', { class: 'muted' }, `Cochez les lots utiles dans « ${room.name} ». Décocher un lot le retire de la pièce (une copie de sécurité est faite avant).`),
+      boxes.map((b) => b.row),
+      h('button', { type: 'button', class: 'btn block', onclick: () => close({ free: true }) }, '✚ Créer une catégorie libre…'),
+      h('div', { class: 'sheet-actions' },
+        h('button', { type: 'button', class: 'btn', onclick: () => close() }, 'Annuler'),
+        h('button', {
+          type: 'button', class: 'btn primary',
+          onclick: () => close({
+            add: boxes.filter((b) => b.cb.checked && !b.r.lot).map((b) => b.r.entry),
+            remove: boxes.filter((b) => !b.cb.checked && b.r.lot).map((b) => b.r.lot),
+          }),
+        }, 'Appliquer')),
+    ];
+  });
+  if (!res) return;
+  if (res.free) return addFreeLot(room, lots, catalogue);
+  if (!res.add.length && !res.remove.length) return;
+
+  if (res.remove.length) {
+    const lotIds = new Set(res.remove.map((l) => l.id));
+    const removedTasks = tasks.filter((t) => lotIds.has(t.lotId));
+    const taskIds = new Set(removedTasks.map((t) => t.id));
+    const removedPhotos = photos.filter((p) => taskIds.has(p.taskId));
+    const done = removedTasks.filter((t) => t.status === 'done').length;
+    const details = [
+      `${removedTasks.length} tâche(s)`,
+      done ? `dont ${done} déjà faite(s)` : '',
+      removedPhotos.length ? `${removedPhotos.length} photo(s) → corbeille` : '',
+    ].filter(Boolean).join(', ');
+    const ok = await confirmBox({
+      title: `Retirer ${res.remove.length} lot(s) ?`,
+      message: `${res.remove.map((l) => `• ${l.name}`).join('\n')}\n\n${details}.\nUne copie de sécurité automatique est faite avant.`,
+      ok: 'Retirer', danger: true,
+    });
+    if (!ok) return;
+    await db.saveSnapshot(`Avant retrait de lots dans « ${room.name} »`);
+    await db.trashMedia('photos', removedPhotos, `Lot retiré de « ${room.name} »`);
+    await db.write([...db.delOps('lots', res.remove), ...db.delOps('tasks', removedTasks)]);
+  }
+  let order = nextOrder(lots);
+  const ops = [];
+  for (const entry of res.add) {
+    const s = lotFromTemplate(room.id, entry, order++);
+    ops.push({ store: 'lots', put: s.lot }, ...db.putOps('tasks', s.tasks));
     ui.openLots.set(s.lot.id, true);
   }
+  await db.write(ops);
+  toast([res.add.length ? `${res.add.length} lot(s) ajouté(s)` : '', res.remove.length ? `${res.remove.length} lot(s) retiré(s)` : ''].filter(Boolean).join(', '));
+  refresh();
+}
+
+async function addFreeLot(room, lots, catalogue) {
+  const name = await askText({ title: 'Nouvelle catégorie', label: 'Nom (ex. VMC, Menuiseries…)' });
+  if (!name) return;
+  const addToCatalogue = await confirmBox({
+    title: 'Modèle de lots',
+    message: `Ajouter aussi « ${name} » au modèle de lots, pour pouvoir l’utiliser dans d’autres pièces ?`,
+    ok: 'Oui, ajouter', cancel: 'Non, ici seulement',
+  });
+  let templateKey = null;
+  if (addToCatalogue) {
+    templateKey = uid();
+    await db.setMeta('catalogue', [...catalogue, { key: templateKey, name, auto: false, tasks: [] }]);
+  }
+  const lot = newLot({ roomId: room.id, name, templateKey, order: nextOrder(lots) });
+  await db.put('lots', lot);
+  ui.openLots.set(lot.id, true);
   refresh();
 }
 
