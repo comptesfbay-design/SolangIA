@@ -1,0 +1,12 @@
+{
+  "name": "suivi-chantier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Suivi de chantier (PWA iPhone, hors connexion)",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test",
+    "icons": "node scripts/make-icons.mjs"
+  }
+}
