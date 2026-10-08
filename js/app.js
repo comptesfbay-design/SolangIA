@@ -52,14 +52,15 @@ async function render({ keepScroll = false } = {}) {
     page = errorPage(e);
   }
   if (seq !== renderSeq) return; // un autre affichage a été demandé entre-temps
-  const y = window.scrollY;
+  const scroller = $('scroller');
+  const y = scroller.scrollTop;
   $('title').textContent = page.title;
   document.title = page.title === APP_NAME ? APP_NAME : `${page.title} · ${APP_NAME}`;
   ui.back = page.back ?? null;
   $('back').hidden = !page.back;
   $('hdr-actions').replaceChildren(...(page.actions ?? []));
   main.replaceChildren(...page.nodes.flat(Infinity).filter((n) => n instanceof Node));
-  window.scrollTo(0, keepScroll ? y : 0);
+  scroller.scrollTop = keepScroll ? y : 0;
   const tab = view === 'reglages' ? 'settings' : 'home';
   for (const a of document.querySelectorAll('.tabbar a')) {
     if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page');
