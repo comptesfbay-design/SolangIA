@@ -1,6 +1,6 @@
 // Service worker : garde une copie des fichiers de l'app pour fonctionner hors connexion.
 // À chaque mise en ligne, changer VERSION ici ET dans js/version.js (le test le vérifie).
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 const CACHE = `suivi-chantier-${VERSION}`;
 const ASSETS = [
   './',
@@ -11,8 +11,11 @@ const ASSETS = [
   './js/backup.js',
   './js/db.js',
   './js/model.js',
+  './js/photos.js',
   './js/ui.js',
   './js/version.js',
+  './js/zip.js',
+  './vendor/jszip.min.js',
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',

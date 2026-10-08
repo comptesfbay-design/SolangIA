@@ -5,8 +5,14 @@ export const STATUS_LABELS = { todo: 'À faire', doing: 'En cours', done: 'Fait'
 export const STATUS_ICONS = { todo: '○', doing: '◐', done: '✓', blocked: '⛔' };
 
 export const BACKUP_APP_ID = 'suivi-chantier-solange';
-export const BACKUP_FORMAT = 1;
+export const BACKUP_FORMAT = 2;
+// Données « structure » (légères) : copiées dans les copies de sécurité automatiques.
 export const DATA_STORES = ['levels', 'rooms', 'lots', 'tasks', 'meta'];
+// Photos et pièces jointes (lourdes) : protégées par la corbeille plutôt que par les copies.
+export const MEDIA_STORES = ['photos', 'files'];
+
+export const PHOTO_PHASES = { initial: 'État initial', encours: 'En cours', fini: 'Fini' };
+export const DEFAULT_PHOTO_SETTINGS = { maxSide: 1600, quality: 0.7, thumbSide: 300 };
 
 // Modèle de lots : `auto: true` = ajouté automatiquement à chaque nouvelle pièce.
 // L'ordre des lots suit l'ordre logique du chantier.
@@ -149,6 +155,84 @@ export function toggleDone(task, now = new Date()) {
   return setStatus(task, task.status === 'done' ? 'todo' : 'done', now);
 }
 
+// Une tâche qui a des sous-tâches est « faite » quand toutes ses sous-tâches le sont.
+export function syncParent(parent, children, now = new Date()) {
+  if (!children.length) return parent;
+  const allDone = children.every((c) => c.status === 'done');
+  if (allDone && parent.status !== 'done') return setStatus(parent, 'done', now);
+  if (!allDone && parent.status === 'done') return setStatus(parent, 'todo', now);
+  return parent;
+}
+
+// Change le statut d'une tâche principale en répercutant sur ses sous-tâches :
+// « fait » coche toutes les sous-tâches, décocher une tâche faite les décoche toutes.
+// Renvoie la tâche et les sous-tâches modifiées.
+export function cascadeStatus(parent, children, status, now = new Date()) {
+  if (!children.length) return { parent: setStatus(parent, status, now), children: [] };
+  let changed = [];
+  if (status === 'done') changed = children.filter((c) => c.status !== 'done').map((c) => setStatus(c, 'done', now));
+  else if (status === 'todo' && parent.status === 'done') changed = children.filter((c) => c.status === 'done').map((c) => setStatus(c, 'todo', now));
+  const merged = children.map((c) => changed.find((x) => x.id === c.id) ?? c);
+  return { parent: syncParent(setStatus(parent, status, now), merged, now), children: changed };
+}
+
+// Change le statut d'une tâche (principale ou sous-tâche) et renvoie toutes les tâches
+// à réenregistrer. lotTasks = les tâches du même lot (pour trouver parent et sous-tâches).
+export function applyStatusChange(task, lotTasks, status, now = new Date()) {
+  if (task.parentId) {
+    const updated = setStatus(task, status, now);
+    const parent = lotTasks.find((x) => x.id === task.parentId);
+    if (!parent) return [updated];
+    const siblings = lotTasks.filter((x) => x.parentId === task.parentId).map((x) => (x.id === task.id ? updated : x));
+    const synced = syncParent(parent, siblings, now);
+    return synced === parent ? [updated] : [updated, synced];
+  }
+  const res = cascadeStatus(task, lotTasks.filter((x) => x.parentId === task.id), status, now);
+  return [res.parent, ...res.children];
+}
+
+// Filtre de date de la galerie : '' (tout), '7' / '30' (derniers jours), 'm:2026-10' (un mois).
+export function inPeriod(iso, period, now = new Date()) {
+  if (!period) return true;
+  if (period.startsWith('m:')) return dayKey(iso).startsWith(period.slice(2));
+  return now - new Date(iso) <= Number(period) * 86_400_000;
+}
+
+// Notes de pièce : « # Titre », « - élément de liste », sinon paragraphe.
+export function parseNotes(text) {
+  const blocks = [];
+  let list = null;
+  for (const raw of (text ?? '').split('\n')) {
+    const line = raw.trim();
+    const item = line.match(/^[-*•]\s+(.*)$/);
+    if (item) {
+      if (!list) blocks.push((list = { type: 'list', items: [] }));
+      list.items.push(item[1]);
+      continue;
+    }
+    list = null;
+    if (!line) continue;
+    const title = line.match(/^#{1,3}\s+(.*)$/);
+    blocks.push(title ? { type: 'title', text: title[1] } : { type: 'text', text: line });
+  }
+  return blocks;
+}
+
+// Dimensions réduites pour que le plus grand côté ne dépasse pas `max` (jamais agrandi).
+export function fitSize(width, height, max) {
+  const scale = Math.min(1, max / Math.max(width, height));
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+export function mediaStats(items) {
+  return { count: items.length, bytes: items.reduce((s, x) => s + (x.size ?? 0) + (x.thumbSize ?? 0), 0) };
+}
+
+const safeName = (name) => String(name).replace(/[\\/:*?"<>|]+/g, '_');
+export const photoPath = (id) => `photos/${id}.jpg`;
+export const thumbPath = (id) => `photos/miniatures/${id}.jpg`;
+export const filePath = (meta) => `fichiers/${meta.id}-${safeName(meta.name)}`;
+
 // Copie les lots et tâches d'une pièce vers une autre. N'ajoute que ce qui manque
 // (comparaison sur le nom), ne supprime rien, remet les statuts à « à faire ».
 export function copyStructure({ source, target }) {
@@ -181,6 +265,12 @@ export function makeBackup(data, appVersion, now = new Date()) {
   return { app: BACKUP_APP_ID, format: BACKUP_FORMAT, appVersion, exportedAt: now.toISOString(), data };
 }
 
+// Les sauvegardes du format 1 (V0) n'avaient ni photos ni pièces jointes.
+export function normalizeBackup(obj) {
+  if (!obj?.data || typeof obj.data !== 'object' || obj.format !== 1) return obj;
+  return { ...obj, data: { ...obj.data, photos: obj.data.photos ?? [], files: obj.data.files ?? [] } };
+}
+
 export function validateBackup(obj) {
   const errors = [];
   if (!obj || typeof obj !== 'object') return { ok: false, errors: ['Le fichier ne contient pas de données lisibles.'] };
@@ -190,10 +280,10 @@ export function validateBackup(obj) {
   }
   const d = obj.data;
   if (!d || typeof d !== 'object') errors.push('Le fichier ne contient pas de données (section « data » absente).');
-  else for (const s of DATA_STORES) if (!Array.isArray(d[s])) errors.push(`Liste « ${s} » absente ou invalide.`);
+  else for (const s of [...DATA_STORES, ...MEDIA_STORES]) if (!Array.isArray(d[s])) errors.push(`Liste « ${s} » absente ou invalide.`);
   if (errors.length) return { ok: false, errors };
 
-  for (const s of ['levels', 'rooms', 'lots', 'tasks']) {
+  for (const s of ['levels', 'rooms', 'lots', 'tasks', ...MEDIA_STORES]) {
     if (d[s].some((x) => !x || typeof x.id !== 'string')) errors.push(`Élément sans identifiant dans « ${s} ».`);
   }
   if (d.meta.some((x) => !x || typeof x.key !== 'string')) errors.push('Réglage sans clé dans « meta ».');
@@ -213,9 +303,18 @@ export function validateBackup(obj) {
 
 const pad = (n) => String(n).padStart(2, '0');
 
-export function backupFileName(now = new Date()) {
+export function backupFileName(now = new Date(), ext = 'zip') {
   const d = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  return `suivi-chantier-${d}-${pad(now.getHours())}h${pad(now.getMinutes())}.json`;
+  return `suivi-chantier-${d}-${pad(now.getHours())}h${pad(now.getMinutes())}.${ext}`;
+}
+
+export function dayKey(iso) {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+export function formatDay(iso) {
+  return new Date(iso).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 export function daysSince(iso, now = new Date()) {

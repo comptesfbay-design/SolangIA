@@ -19,9 +19,11 @@ test('tous les fichiers listés dans sw.js existent', () => {
   }
 });
 
-test('tous les modules js/ sont gardés pour le hors-connexion', () => {
-  for (const f of readdirSync(new URL('../js/', import.meta.url))) {
-    assert.ok(assets.includes(`./js/${f}`), `Ajoutez './js/${f}' à la liste ASSETS de sw.js`);
+test('tous les scripts (js/ et vendor/) sont gardés pour le hors-connexion', () => {
+  for (const dir of ['js', 'vendor']) {
+    for (const f of readdirSync(new URL(`../${dir}/`, import.meta.url)).filter((x) => x.endsWith('.js'))) {
+      assert.ok(assets.includes(`./${dir}/${f}`), `Ajoutez './${dir}/${f}' à la liste ASSETS de sw.js`);
+    }
   }
 });
 

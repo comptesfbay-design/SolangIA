@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_CATALOGUE, progress, moveItem, nextOrder, newTask, newLot, structureForNewRoom,
-  setStatus, toggleDone, copyStructure, makeBackup, validateBackup, daysSince, backupFileName,
+  setStatus, toggleDone, copyStructure, makeBackup, validateBackup, normalizeBackup, daysSince, backupFileName,
+  syncParent, applyStatusChange, parseNotes, fitSize, mediaStats, inPeriod, filePath,
 } from '../js/model.js';
 
 const task = (id, status = 'todo', extra = {}) => ({ id, status, parentId: null, ...extra });
@@ -100,8 +101,16 @@ function sampleData() {
   const room = { id: 'R1', levelId: 'L1', name: 'Séjour', order: 0 };
   const lot = { id: 'T1', roomId: 'R1', name: 'Bandes', order: 0 };
   const t = newTask({ lotId: 'T1', roomId: 'R1', title: 'Bandes posées' });
-  return { levels: [level], rooms: [room], lots: [lot], tasks: [t], meta: [{ key: 'seeded', value: true }] };
+  return { levels: [level], rooms: [room], lots: [lot], tasks: [t], meta: [{ key: 'seeded', value: true }], photos: [], files: [] };
 }
+
+test('sauvegarde : un ancien fichier V0 (format 1, sans photos) reste accepté', () => {
+  const { photos, files, ...v0data } = sampleData();
+  const old = { ...makeBackup(v0data, '0.1.0'), format: 1 };
+  assert.equal(validateBackup(old).ok, false);
+  const r = validateBackup(normalizeBackup(old));
+  assert.deepEqual(r, { ok: true, errors: [] });
+});
 
 test('sauvegarde : un fichier produit par l’app est accepté', () => {
   const b = JSON.parse(JSON.stringify(makeBackup(sampleData(), '0.1.0')));
@@ -129,5 +138,88 @@ test('rappel de sauvegarde : nombre de jours écoulés', () => {
 });
 
 test('nom du fichier de sauvegarde', () => {
-  assert.equal(backupFileName(new Date(2026, 9, 8, 7, 5)), 'suivi-chantier-2026-10-08-07h05.json');
+  assert.equal(backupFileName(new Date(2026, 9, 8, 7, 5)), 'suivi-chantier-2026-10-08-07h05.zip');
+  assert.equal(backupFileName(new Date(2026, 9, 8, 7, 5), 'json'), 'suivi-chantier-2026-10-08-07h05.json');
+});
+
+// ---------- Sous-tâches ----------
+
+function family() {
+  const parent = newTask({ lotId: 'L', roomId: 'R', title: 'Ponçage' });
+  const a = newTask({ lotId: 'L', roomId: 'R', title: 'Grain 80', parentId: parent.id });
+  const b = newTask({ lotId: 'L', roomId: 'R', title: 'Grain 120', parentId: parent.id });
+  const other = newTask({ lotId: 'L', roomId: 'R', title: 'Autre' });
+  return { parent, a, b, other, all: [parent, a, b, other] };
+}
+
+test('sous-tâche : cocher la dernière coche aussi la tâche principale', () => {
+  const f = family();
+  const step1 = applyStatusChange(f.a, f.all, 'done');
+  assert.deepEqual(step1.map((t) => [t.title, t.status]), [['Grain 80', 'done']]);
+  const all2 = f.all.map((t) => step1.find((x) => x.id === t.id) ?? t);
+  const step2 = applyStatusChange(f.b, all2, 'done');
+  assert.deepEqual(step2.map((t) => [t.title, t.status]), [['Grain 120', 'done'], ['Ponçage', 'done']]);
+});
+
+test('sous-tâche : décocher une sous-tâche décoche la tâche principale', () => {
+  const f = family();
+  const done = f.all.map((t) => (t.id === f.other.id ? t : setStatus(t, 'done')));
+  const res = applyStatusChange(done[1], done, 'todo');
+  assert.deepEqual(res.map((t) => [t.title, t.status]), [['Grain 80', 'todo'], ['Ponçage', 'todo']]);
+});
+
+test('tâche principale : cocher coche toutes ses sous-tâches, décocher les décoche', () => {
+  const f = family();
+  const res = applyStatusChange(f.parent, f.all, 'done');
+  assert.deepEqual(res.map((t) => t.status), ['done', 'done', 'done']);
+  const after = f.all.map((t) => res.find((x) => x.id === t.id) ?? t);
+  const back = applyStatusChange(after[0], after, 'todo');
+  assert.deepEqual(back.map((t) => t.status), ['todo', 'todo', 'todo']);
+  assert.equal(applyStatusChange(f.parent, f.all, 'blocked').length, 1);
+});
+
+test('tâche sans sous-tâche : changement simple', () => {
+  const f = family();
+  const res = applyStatusChange(f.other, f.all, 'doing');
+  assert.deepEqual(res.map((t) => [t.title, t.status]), [['Autre', 'doing']]);
+  assert.equal(syncParent(f.other, []), f.other);
+});
+
+// ---------- Notes, photos, galerie ----------
+
+test('notes : titres, listes et paragraphes', () => {
+  assert.deepEqual(parseNotes('# Prises\n- 2 doubles\n- 1 RJ45\n\nVoir plan\n## Éclairage\n* spots'), [
+    { type: 'title', text: 'Prises' },
+    { type: 'list', items: ['2 doubles', '1 RJ45'] },
+    { type: 'text', text: 'Voir plan' },
+    { type: 'title', text: 'Éclairage' },
+    { type: 'list', items: ['spots'] },
+  ]);
+  assert.deepEqual(parseNotes(''), []);
+  assert.deepEqual(parseNotes(undefined), []);
+});
+
+test('photos : réduction au côté long, jamais d’agrandissement', () => {
+  assert.deepEqual(fitSize(4032, 3024, 1600), { width: 1600, height: 1200 });
+  assert.deepEqual(fitSize(3024, 4032, 1600), { width: 1200, height: 1600 });
+  assert.deepEqual(fitSize(800, 600, 1600), { width: 800, height: 600 });
+  assert.deepEqual(fitSize(1600, 1200, 300), { width: 300, height: 225 });
+});
+
+test('photos : poids total', () => {
+  assert.deepEqual(mediaStats([{ size: 300, thumbSize: 20 }, { size: 100 }]), { count: 2, bytes: 420 });
+});
+
+test('galerie : filtre de dates', () => {
+  const now = new Date('2026-10-08T12:00:00');
+  assert.equal(inPeriod('2026-10-02T12:00:00', '', now), true);
+  assert.equal(inPeriod('2026-10-02T12:00:00', '7', now), true);
+  assert.equal(inPeriod('2026-09-20T12:00:00', '7', now), false);
+  assert.equal(inPeriod('2026-09-20T12:00:00', '30', now), true);
+  assert.equal(inPeriod('2026-09-20T12:00:00', 'm:2026-09', now), true);
+  assert.equal(inPeriod('2026-10-01T12:00:00', 'm:2026-09', now), false);
+});
+
+test('pièces jointes : nom de fichier sans caractères interdits', () => {
+  assert.equal(filePath({ id: 'x1', name: 'Plan RDC: v2/final?.pdf' }), 'fichiers/x1-Plan RDC_ v2_final_.pdf');
 });

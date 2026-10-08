@@ -1,8 +1,8 @@
 // Accès à la base IndexedDB du téléphone : toutes les données de l'app y sont rangées.
-import { DATA_STORES } from './model.js';
+import { DATA_STORES, MEDIA_STORES } from './model.js';
 
 const DB_NAME = 'suivi-chantier';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
 const SAFETY_DB = 'suivi-chantier-secours';
 const MAX_SNAPSHOTS = 10;
 
@@ -43,10 +43,22 @@ function upgrade(db, oldVersion) {
     tasks.createIndex('status', 'status');
     db.createObjectStore('meta', { keyPath: 'key' });
   }
+  if (oldVersion < 2) {
+    // photos : infos + miniature ; files : infos des pièces jointes ; blobs : contenus lourds.
+    const photos = db.createObjectStore('photos', { keyPath: 'id' });
+    photos.createIndex('roomId', 'roomId');
+    photos.createIndex('taskId', 'taskId');
+    photos.createIndex('deletedAt', 'deletedAt');
+    const files = db.createObjectStore('files', { keyPath: 'id' });
+    files.createIndex('roomId', 'roomId');
+    files.createIndex('deletedAt', 'deletedAt');
+    db.createObjectStore('blobs', { keyPath: 'id' });
+  }
 }
 
+// Lit les données « structure » (pas les photos ni les pièces jointes).
 async function readAll(db) {
-  const names = [...db.objectStoreNames];
+  const names = [...db.objectStoreNames].filter((n) => DATA_STORES.includes(n));
   const out = {};
   if (!names.length) return out;
   const tx = db.transaction(names, 'readonly');
@@ -160,6 +172,8 @@ export async function listSnapshots() {
   }));
 }
 
+// Revenir à l'état de la copie : remet aussi les photos et pièces jointes
+// mises à la corbeille après la date de la copie.
 export async function restoreSnapshot(id) {
   const db = await openSafety();
   const snap = await req(db.transaction('snapshots').objectStore('snapshots').get(id));
@@ -167,4 +181,55 @@ export async function restoreSnapshot(id) {
   if (!snap) throw new Error('Copie de sécurité introuvable.');
   await saveSnapshot('Avant restauration d’une copie de sécurité');
   await replaceAll(snap.data);
+  const trash = await listTrash();
+  await restoreMedia([...trash.photos, ...trash.files].filter((x) => x.deletedAt >= snap.at));
+}
+
+// ---------- Photos, pièces jointes et corbeille ----------
+// Rien n'est effacé directement : on met à la corbeille (deletedAt), et seul
+// « Vider la corbeille » efface vraiment.
+
+export async function activeMedia(store, index, value) {
+  const list = index ? await byIndex(store, index, value) : await all(store);
+  return list.filter((x) => !x.deletedAt);
+}
+
+export async function getBlob(id) {
+  return (await get('blobs', id))?.blob ?? null;
+}
+
+// item = { store: 'photos' | 'files', meta, blob }
+export function saveMedia(items) {
+  return write(items.flatMap(({ store, meta, blob }) => [{ store, put: meta }, { store: 'blobs', put: { id: meta.id, blob } }]));
+}
+
+export function trashMedia(store, items, reason) {
+  const deletedAt = new Date().toISOString();
+  return write(items.map((x) => ({ store, put: { ...x, deletedAt, deletedReason: reason } })));
+}
+
+export function restoreMedia(items) {
+  return write(items.map((x) => {
+    const { deletedAt, deletedReason, ...rest } = stripStore(x);
+    return { store: x.store, put: rest };
+  }));
+}
+
+const stripStore = ({ store, ...rest }) => rest;
+
+export async function listTrash() {
+  const db = await getDB();
+  const tx = db.transaction(MEDIA_STORES);
+  const [photos, files] = await Promise.all(MEDIA_STORES.map((s) => req(tx.objectStore(s).index('deletedAt').getAll())));
+  return {
+    photos: photos.map((x) => ({ ...x, store: 'photos' })),
+    files: files.map((x) => ({ ...x, store: 'files' })),
+  };
+}
+
+export async function purgeTrash() {
+  const { photos, files } = await listTrash();
+  const items = [...photos, ...files];
+  await write(items.flatMap((x) => [{ store: x.store, del: x.id }, { store: 'blobs', del: x.id }]));
+  return items.length;
 }
