@@ -14,6 +14,8 @@ function sample() {
     lots: [{ id: 'T1', roomId: 'R1', name: 'Électricité', order: 0 }],
     tasks: [newTask({ lotId: 'T1', roomId: 'R1', title: 'Gaines tirées' })],
     meta: [{ key: 'seeded', value: true }],
+    needs: [{ id: 'N1', roomId: 'R1', lotId: 'T1', name: 'Gaine ICTA Ø20', qty: 50, unit: 'm', boughtAt: null }],
+    stock: [{ id: 'S1', name: 'Gaine ICTA Ø20', qty: 20, unit: 'm' }],
   };
   const photos = [{ meta: { id: 'P1', roomId: 'R1', taskId: data.tasks[0].id, caption: 'Gaines', createdAt: '2026-10-08T10:00:00Z', size: 3, thumbSize: 1 }, blob: bytes(1, 2, 3), thumb: bytes(9) }];
   const files = [{ meta: { id: 'F1', roomId: 'R1', name: 'plan RDC.pdf', type: 'application/pdf', size: 2 }, blob: bytes(7, 7) }];
@@ -27,6 +29,8 @@ test('sauvegarde .zip : aller-retour complet (données, photos, miniatures, piè
   const r = await readBackupZip(JSZip, raw, 'uint8array');
   assert.equal(r.ok, true, r.errors?.join());
   assert.equal(r.backup.data.tasks[0].title, 'Gaines tirées');
+  assert.equal(r.backup.data.needs[0].qty, 50);
+  assert.equal(r.backup.data.stock[0].name, 'Gaine ICTA Ø20');
   assert.deepEqual([...r.photos[0].blob], [1, 2, 3]);
   assert.deepEqual([...r.photos[0].thumb], [9]);
   assert.equal(r.photos[0].meta.caption, 'Gaines');

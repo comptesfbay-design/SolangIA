@@ -1,10 +1,12 @@
 // Point d'entrée de l'application : écrans, navigation et actions.
 import * as db from './db.js';
 import {
-  DEFAULT_CATALOGUE, DEFAULT_FINISHES, DEFAULT_PHOTO_SETTINGS, SEED_LEVELS, STATUSES, STATUS_LABELS, STATUS_ICONS, PHOTO_PHASES,
-  uid, groupBy, progress, sortByOrder, nextOrder, moveItem, newRoom, newLot, newTask, lotFromTemplate,
-  structureForNewRoom, setStatus, syncParent, applyStatusChange, copyStructure, parseNotes, mediaStats, inPeriod,
-  daysSince, dayKey, formatDate, formatDay, formatBytes,
+  DEFAULT_CATALOGUE, DEFAULT_FINISHES, DEFAULT_PHOTO_SETTINGS, DEFAULT_UNITS, SEED_LEVELS, STATUSES, STATUS_LABELS, STATUS_ICONS,
+  PHOTO_PHASES, PROGRESS_STEPS,
+  uid, groupBy, progress, taskValue, sortByOrder, nextOrder, moveItem, newRoom, newLot, newTask, lotFromTemplate,
+  structureForNewRoom, setStatus, setProgress, syncParent, applyStatusChange, applyProgressChange, copyStructure, parseNotes,
+  mediaStats, inPeriod, daysSince, dayKey, formatDate, formatDay, formatBytes,
+  articleKey, parseQty, formatQty, qtyLabel, newNeed, shoppingSummary, shoppingText, parseArticles, formatArticles,
 } from './model.js';
 import { h, sheet, askText, confirmBox, choose, toast, longPress } from './ui.js';
 import { prepareExport, deliverFile, markBackupDone, readBackupFile, applyBackup, countReplacedMedia } from './backup.js';
@@ -19,6 +21,7 @@ const main = $('main');
 const ui = {
   organise: false, openLots: new Map(), back: null, updating: false,
   roomPhase: 'initial', editNotes: null, gallery: { room: '', lot: '', period: '' },
+  openNeeds: new Set(), coursesTab: 'buy',
 };
 let swRegistration = null;
 let waitingWorker = null;
@@ -31,6 +34,7 @@ async function start() {
   window.addEventListener('hashchange', () => render());
   try {
     await seedIfEmpty();
+    await addMissingLibraries();
   } catch (e) {
     showError(e);
     return;
@@ -51,6 +55,7 @@ async function render({ keepScroll = false } = {}) {
   try {
     if (view === 'piece' && id) page = await viewRoom(decodeURIComponent(id));
     else if (view === 'photos') page = await viewGallery();
+    else if (view === 'courses') page = await viewCourses();
     else if (view === 'reglages') page = await viewSettings();
     else page = await viewHome();
   } catch (e) {
@@ -67,7 +72,7 @@ async function render({ keepScroll = false } = {}) {
   $('hdr-actions').replaceChildren(...(page.actions ?? []));
   main.replaceChildren(...page.nodes.flat(Infinity).filter((n) => n instanceof Node));
   scroller.scrollTop = keepScroll ? y : 0;
-  const tab = { reglages: 'settings', photos: 'photos' }[view] ?? 'home';
+  const tab = { reglages: 'settings', photos: 'photos', courses: 'courses' }[view] ?? 'home';
   for (const a of document.querySelectorAll('.tabbar a')) {
     if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -138,6 +143,15 @@ async function seedIfEmpty() {
   await db.write(ops);
 }
 
+// Les modèles de lots créés avant la 0.3.0 n'avaient pas de bibliothèque d'articles :
+// on ajoute celle par défaut (sans toucher à ce qui existe).
+async function addMissingLibraries() {
+  const catalogue = await db.getMeta('catalogue', null);
+  if (!catalogue || catalogue.every((e) => Array.isArray(e.articles))) return;
+  const defaults = Object.fromEntries(DEFAULT_CATALOGUE.map((e) => [e.key, e.articles]));
+  await db.setMeta('catalogue', catalogue.map((e) => (Array.isArray(e.articles) ? e : { ...e, articles: JSON.parse(JSON.stringify(defaults[e.key] ?? [])) })));
+}
+
 async function requestPersistentStorage() {
   try {
     if (navigator.storage?.persist && !(await navigator.storage.persisted())) await navigator.storage.persist();
@@ -147,7 +161,8 @@ async function requestPersistentStorage() {
 // ---------- Écran Accueil ----------
 
 async function viewHome() {
-  const [levels, rooms, tasks] = await Promise.all([db.all('levels'), db.all('rooms'), db.all('tasks')]);
+  const [levels, rooms, tasks, needs] = await Promise.all([db.all('levels'), db.all('rooms'), db.all('tasks'), db.all('needs')]);
+  const openNeeds = needs.filter((n) => !n.boughtAt).length;
   const sortedLevels = sortByOrder(levels);
   const roomsByLevel = groupBy(rooms, 'levelId');
   const tasksByRoom = groupBy(tasks, 'roomId');
@@ -171,6 +186,8 @@ async function viewHome() {
         h('ul', { class: 'list' }, blocked.map((t) => h('li', null,
           h('a', { class: 'row-link', href: `#/piece/${t.roomId}` },
             h('span', null, t.title), h('span', { class: 'muted' }, roomName[t.roomId] ?? '?')))))) : null,
+      openNeeds ? h('a', { class: 'card row-link', href: '#/courses' },
+        h('span', null, `🛒 ${openNeeds} article(s) à acheter`), h('span', { class: 'muted' }, 'Voir ›')) : null,
       ui.organise ? h('p', { class: 'muted' }, 'Mode organisation : déplacez (↑ ↓), renommez (✏️) ou supprimez (🗑) les niveaux et les pièces.') : null,
       sortedLevels.map((level) => levelSection(level, roomsByLevel[level.id] ?? [], tasksByRoom, levels)),
       ui.organise ? h('button', { class: 'btn block', onclick: () => addLevel(levels) }, '+ Ajouter un niveau') : null,
@@ -237,9 +254,10 @@ async function trashRoomsMedia(roomIds, reason) {
 
 async function deleteLevel(level, rooms) {
   const roomIds = new Set(rooms.map((r) => r.id));
-  const [lots, tasks] = await Promise.all([db.all('lots'), db.all('tasks')]);
+  const [lots, tasks, needs] = await Promise.all([db.all('lots'), db.all('tasks'), db.all('needs')]);
   const lotsToDelete = lots.filter((l) => roomIds.has(l.roomId));
   const tasksToDelete = tasks.filter((t) => roomIds.has(t.roomId));
+  const needsToDelete = needs.filter((n) => roomIds.has(n.roomId));
   const ok = await confirmBox({
     title: 'Supprimer le niveau ?',
     message: `« ${level.name} » sera supprimé avec ses ${rooms.length} pièce(s) et ${tasksToDelete.length} tâche(s).\n\nUne copie de sécurité automatique est faite avant (Réglages → Copies de sécurité). Les photos vont à la corbeille.`,
@@ -248,13 +266,18 @@ async function deleteLevel(level, rooms) {
   if (!ok) return;
   await db.saveSnapshot(`Avant suppression du niveau « ${level.name} »`);
   await trashRoomsMedia(roomIds, `Niveau supprimé : ${level.name}`);
-  await db.write([{ store: 'levels', del: level.id }, ...db.delOps('rooms', rooms), ...db.delOps('lots', lotsToDelete), ...db.delOps('tasks', tasksToDelete)]);
+  await db.write([
+    { store: 'levels', del: level.id }, ...db.delOps('rooms', rooms), ...db.delOps('lots', lotsToDelete),
+    ...db.delOps('tasks', tasksToDelete), ...db.delOps('needs', needsToDelete),
+  ]);
   toast('Niveau supprimé');
   refresh();
 }
 
 async function deleteRoom(room) {
-  const [lots, tasks] = await Promise.all([db.byIndex('lots', 'roomId', room.id), db.byIndex('tasks', 'roomId', room.id)]);
+  const [lots, tasks, needs] = await Promise.all([
+    db.byIndex('lots', 'roomId', room.id), db.byIndex('tasks', 'roomId', room.id), db.byIndex('needs', 'roomId', room.id),
+  ]);
   const ok = await confirmBox({
     title: 'Supprimer la pièce ?',
     message: `« ${room.name} » sera supprimée avec ses ${lots.length} lot(s) et ${tasks.length} tâche(s).\n\nUne copie de sécurité automatique est faite avant (Réglages → Copies de sécurité). Les photos vont à la corbeille.`,
@@ -263,7 +286,7 @@ async function deleteRoom(room) {
   if (!ok) return;
   await db.saveSnapshot(`Avant suppression de la pièce « ${room.name} »`);
   await trashRoomsMedia(new Set([room.id]), `Pièce supprimée : ${room.name}`);
-  await db.write([{ store: 'rooms', del: room.id }, ...db.delOps('lots', lots), ...db.delOps('tasks', tasks)]);
+  await db.write([{ store: 'rooms', del: room.id }, ...db.delOps('lots', lots), ...db.delOps('tasks', tasks), ...db.delOps('needs', needs)]);
   toast('Pièce supprimée');
   go('#/');
 }
@@ -283,13 +306,15 @@ async function deleteTasks(tasks, label) {
 async function viewRoom(id) {
   const room = await db.get('rooms', id);
   if (!room) return { title: 'Pièce introuvable', back: '#/', nodes: [h('p', { class: 'card' }, 'Cette pièce n’existe plus.')] };
-  const [level, lots, tasks, catalogue, finishes, photos, files] = await Promise.all([
+  const [level, lots, tasks, catalogue, finishes, photos, files, needs] = await Promise.all([
     db.get('levels', room.levelId), db.byIndex('lots', 'roomId', id), db.byIndex('tasks', 'roomId', id),
     db.getMeta('catalogue', []), db.getMeta('finishes', DEFAULT_FINISHES),
-    db.activeMedia('photos', 'roomId', id), db.activeMedia('files', 'roomId', id),
+    db.activeMedia('photos', 'roomId', id), db.activeMedia('files', 'roomId', id), db.byIndex('needs', 'roomId', id),
   ]);
+  fillArticleSuggestions();
   const sortedLots = sortByOrder(lots);
   const tasksByLot = groupBy(tasks, 'lotId');
+  const needsByLot = groupBy(needs, 'lotId');
   const photosByTask = groupBy(photos.filter((p) => p.taskId), 'taskId');
   const firstUnfinished = sortedLots.find((l) => progress(tasksByLot[l.id] ?? []).pct < 100);
   const p = progress(tasks);
@@ -309,7 +334,7 @@ async function viewRoom(id) {
         bar(p.pct),
         h('p', { class: 'muted small' }, `${p.done} / ${p.total} tâche(s) faite(s) · appui long sur une tâche pour changer son statut`),
         h('label', { class: 'inline-field' }, 'Finition peinture', finishSelect)),
-      sortedLots.map((lot) => lotSection(lot, tasksByLot[lot.id] ?? [], sortedLots, lot === firstUnfinished, photosByTask)),
+      sortedLots.map((lot) => lotSection(lot, tasksByLot[lot.id] ?? [], sortedLots, lot === firstUnfinished, photosByTask, needsByLot[lot.id] ?? [], catalogue)),
       lots.length ? null : h('p', { class: 'card muted' }, 'Aucun lot dans cette pièce.'),
       h('div', { class: 'stack' },
         h('button', { class: 'btn block', onclick: () => manageLots(room, lots, tasks, photos, catalogue) }, '🧱 Choisir les lots de la pièce'),
@@ -324,7 +349,7 @@ async function viewRoom(id) {
   };
 }
 
-function lotSection(lot, tasks, sortedLots, openByDefault, photosByTask) {
+function lotSection(lot, tasks, sortedLots, openByDefault, photosByTask, needs, catalogue) {
   const p = progress(tasks);
   const open = ui.openLots.has(lot.id) ? ui.openLots.get(lot.id) : openByDefault;
   const top = sortByOrder(tasks.filter((t) => !t.parentId));
@@ -354,6 +379,7 @@ function lotSection(lot, tasks, sortedLots, openByDefault, photosByTask) {
           children.map((c) => taskRow(c, { sub: true, photoCount: photosByTask[c.id]?.length ?? 0 })),
         ];
       })),
+      lotNeedsSection(lot, needs, catalogue),
       h('button', { class: 'btn small ghost', onclick: () => lotMenu(lot, sortedLots, tasks) }, '⋯ Options du lot')));
   details.addEventListener('toggle', () => ui.openLots.set(lot.id, details.open));
   return details;
@@ -369,9 +395,10 @@ function taskRow(t, { children = [], photoCount = 0, sub = false } = {}) {
     }, h('span', { class: 'box' }, done ? '✓' : '')),
     h('button', { class: 'task-main', onclick: () => openTask(t.id) },
       h('span', { class: 'task-title' }, t.title),
-      sp ? h('span', { class: 'badge count' }, `${sp.done}/${sp.total}`) : null,
+      sp ? h('span', { class: 'badge count' }, `${sp.done}/${sp.total} · ${sp.pct} %`) : null,
       t.status === 'doing' || t.status === 'blocked'
-        ? h('span', { class: `badge st-${t.status}` }, `${STATUS_ICONS[t.status]} ${STATUS_LABELS[t.status]}`) : null,
+        ? h('span', { class: `badge st-${t.status}` }, `${STATUS_ICONS[t.status]} ${STATUS_LABELS[t.status]}${!sp && t.progress ? ` · ${t.progress} %` : ''}`) : null,
+      !sp && t.status !== 'done' && t.progress ? bar(t.progress, 'thin task-bar') : null,
       photoCount ? h('span', { class: 'task-note' }, `📷 ${photoCount}`) : null,
       t.comment ? h('span', { class: 'task-note', 'aria-label': 'Commentaire' }, '💬') : null));
   longPress(li, () => quickStatus(t));
@@ -386,27 +413,66 @@ async function changeStatus(taskId, status, { quiet = false } = {}) {
   if (!quiet) refresh();
 }
 
+async function changeProgress(taskId, pct, { quiet = false } = {}) {
+  const task = await db.get('tasks', taskId);
+  if (!task) return;
+  const lotTasks = await db.byIndex('tasks', 'lotId', task.lotId);
+  await db.write(db.putOps('tasks', applyProgressChange(task, lotTasks, pct)));
+  if (!quiet) refresh();
+}
+
+const pctOf = (t) => Math.round(taskValue(t) * 100);
+
+// Boutons 0 / 25 / 50 / 75 / 100 % (gros, utilisables avec des gants).
+function progressButtons(current, onPick) {
+  const box = h('div', { class: 'segmented five', role: 'radiogroup', 'aria-label': 'Avancement' }, PROGRESS_STEPS.map((p) => h('button', {
+    type: 'button', class: 'seg', role: 'radio', 'data-pct': p, onclick: () => onPick(p),
+  }, `${p} %`)));
+  box.show = (pct) => { for (const b of box.children) b.setAttribute('aria-checked', String(Number(b.dataset.pct) === pct)); };
+  box.show(current);
+  return box;
+}
+
+// Appui long : avancement (si pas de sous-tâches) et statut.
 async function quickStatus(t) {
-  const status = await choose({
-    title: t.title,
-    options: STATUSES.map((s) => ({ label: `${STATUS_ICONS[s]}  ${STATUS_LABELS[s]}`, value: s, hint: s === t.status ? 'statut actuel' : null })),
-  });
-  if (status) await changeStatus(t.id, status);
+  const hasChildren = (await db.byIndex('tasks', 'lotId', t.lotId)).some((x) => x.parentId === t.id);
+  const res = await sheet(t.title, (close) => [
+    hasChildren ? null : [h('div', { class: 'lbl' }, 'Avancement'), progressButtons(pctOf(t), (p) => close({ progress: p }))],
+    h('div', { class: 'lbl' }, 'Statut'),
+    STATUSES.map((s) => h('button', { type: 'button', class: 'opt', onclick: () => close({ status: s }) },
+      `${STATUS_ICONS[s]}  ${STATUS_LABELS[s]}`, s === t.status ? h('small', null, 'statut actuel') : null)),
+  ]);
+  if (res?.status) await changeStatus(t.id, res.status);
+  else if (res?.progress != null) await changeProgress(t.id, res.progress);
 }
 
 async function openTask(id) {
   const t = await db.get('tasks', id);
   if (!t) return;
   const res = await sheet(t.parentId ? 'Sous-tâche' : 'Tâche', (close) => {
-    let status = null; // null = statut non modifié dans cette fiche
+    // null = non modifié dans cette fiche. Le dernier touché (statut ou %) l'emporte.
+    let status = null;
+    let pct = null;
     const title = h('input', { class: 'field', value: t.title, autocomplete: 'off' });
     const comment = h('textarea', { class: 'field', rows: 3, value: t.comment ?? '', placeholder: 'Commentaire…' });
     const seg = h('div', { class: 'segmented', role: 'radiogroup', 'aria-label': 'Statut' }, STATUSES.map((s) => h('button', {
       type: 'button', class: `seg st-${s}`, role: 'radio', 'data-status': s,
-      onclick: () => { status = s; showStatus(s); },
+      onclick: () => {
+        status = s;
+        pct = null;
+        showStatus(s);
+        progressBox.show(pctOf(setStatus(t, s)));
+      },
     }, `${STATUS_ICONS[s]} ${STATUS_LABELS[s]}`)));
     const showStatus = (s) => { for (const b of seg.children) b.setAttribute('aria-checked', String(b.dataset.status === s)); };
     showStatus(t.status);
+    const progressBox = progressButtons(pctOf(t), (p) => {
+      pct = p;
+      status = null;
+      progressBox.show(p);
+      showStatus(setProgress(t, p).status);
+    });
+    const progressSection = h('div', null, h('div', { class: 'lbl' }, 'Avancement'), progressBox);
 
     // Sous-tâches (enregistrées tout de suite, sans attendre « Enregistrer »)
     const subBox = h('div');
@@ -414,7 +480,9 @@ async function openTask(id) {
       const lotTasks = await db.byIndex('tasks', 'lotId', t.lotId);
       const kids = sortByOrder(lotTasks.filter((x) => x.parentId === t.id));
       const current = lotTasks.find((x) => x.id === t.id);
-      if (status === null && current) showStatus(current.status);
+      if (status === null && pct === null && current) showStatus(current.status);
+      // Avec des sous-tâches, l'avancement se calcule tout seul : on cache les boutons %.
+      progressSection.hidden = kids.length > 0;
       const input = h('input', { class: 'field', placeholder: 'Nouvelle sous-tâche…', enterkeyhint: 'done', autocomplete: 'off' });
       const add = async () => {
         const text = input.value.trim();
@@ -431,7 +499,8 @@ async function openTask(id) {
             type: 'button', class: 'check', role: 'checkbox', 'aria-checked': String(k.status === 'done'), 'aria-label': `Fait : ${k.title}`,
             onclick: async () => { await changeStatus(k.id, k.status === 'done' ? 'todo' : 'done'); loadSubs(); },
           }, h('span', { class: 'box' }, k.status === 'done' ? '✓' : '')),
-          h('span', { class: 'task-main' }, h('span', { class: 'task-title' }, k.title)),
+          h('span', { class: 'task-main' }, h('span', { class: 'task-title' }, k.title),
+            k.status !== 'done' && k.progress ? h('span', { class: 'badge count' }, `${k.progress} %`) : null),
           toolBtn('🗑', `Supprimer « ${k.title} »`, async () => {
             if (!(await confirmBox({ title: 'Supprimer la sous-tâche ?', message: `« ${k.title} »`, ok: 'Supprimer', danger: true }))) return;
             await deleteTasks([k], `la sous-tâche « ${k.title} »`);
@@ -458,11 +527,12 @@ async function openTask(id) {
     return h('form', {
       onsubmit: (e) => {
         e.preventDefault();
-        close({ action: 'save', title: title.value.trim() || t.title, status, comment: comment.value });
+        close({ action: 'save', title: title.value.trim() || t.title, status, pct, comment: comment.value });
       },
     },
     h('label', { class: 'lbl' }, 'Intitulé', title),
     h('div', { class: 'lbl' }, 'Statut'), seg,
+    progressSection,
     t.doneAt ? h('p', { class: 'muted small' }, `Fait le ${formatDate(t.doneAt)}`) : null,
     h('label', { class: 'lbl' }, 'Commentaire', comment),
     t.parentId ? null : [h('div', { class: 'lbl' }, 'Sous-tâches'), subBox],
@@ -490,6 +560,7 @@ async function openTask(id) {
   } else {
     await db.put('tasks', { ...current, title: res.title, comment: res.comment });
     if (res.status && res.status !== current.status) await changeStatus(id, res.status, { quiet: true });
+    else if (res.pct != null && res.pct !== pctOf(current)) await changeProgress(id, res.pct, { quiet: true });
   }
   refresh();
 }
@@ -587,7 +658,7 @@ async function lotMenu(lot, sortedLots, tasks) {
   if (!ok) return;
   if (tasks.length) await deleteTasks(tasks, `le lot « ${lot.name} »`);
   else await db.saveSnapshot(`Avant retrait du lot « ${lot.name} »`);
-  await db.write([{ store: 'lots', del: lot.id }]);
+  await db.write([{ store: 'lots', del: lot.id }, ...db.delOps('needs', await db.byIndex('needs', 'lotId', lot.id))]);
   toast('Lot retiré');
   refresh();
 }
@@ -645,7 +716,8 @@ async function manageLots(room, lots, tasks, photos, catalogue) {
     if (!ok) return;
     await db.saveSnapshot(`Avant retrait de lots dans « ${room.name} »`);
     await db.trashMedia('photos', removedPhotos, `Lot retiré de « ${room.name} »`);
-    await db.write([...db.delOps('lots', res.remove), ...db.delOps('tasks', removedTasks)]);
+    const removedNeeds = (await db.byIndex('needs', 'roomId', room.id)).filter((n) => lotIds.has(n.lotId));
+    await db.write([...db.delOps('lots', res.remove), ...db.delOps('tasks', removedTasks), ...db.delOps('needs', removedNeeds)]);
   }
   let order = nextOrder(lots);
   const ops = [];
@@ -670,7 +742,7 @@ async function addFreeLot(room, lots, catalogue) {
   let templateKey = null;
   if (addToCatalogue) {
     templateKey = uid();
-    await db.setMeta('catalogue', [...catalogue, { key: templateKey, name, auto: false, tasks: [] }]);
+    await db.setMeta('catalogue', [...catalogue, { key: templateKey, name, auto: false, tasks: [], articles: [] }]);
   }
   const lot = newLot({ roomId: room.id, name, templateKey, order: nextOrder(lots) });
   await db.put('lots', lot);
@@ -692,6 +764,350 @@ async function copyRoomStructure(room, lots, tasks) {
   const res = copyStructure({ source: { lots, tasks }, target: { roomId: targetId, lots: tLots, tasks: tTasks } });
   await db.write([...db.putOps('lots', res.lots), ...db.putOps('tasks', res.tasks)]);
   toast(`${res.lots.length} lot(s) et ${res.tasks.length} tâche(s) ajoutés`);
+}
+
+// ---------- Courses : liste par lot et bibliothèque d'articles ----------
+
+const catalogueEntryOf = (lot, catalogue) => catalogue.find((e) => e.key === lot.templateKey) ?? null;
+const sortNeeds = (needs) => [...needs].sort((a, b) => Number(!!a.boughtAt) - Number(!!b.boughtAt) || a.name.localeCompare(b.name, 'fr'));
+
+// Suggestions de saisie (noms d'articles et unités déjà connus), pour écrire pareil partout.
+const knownNames = new Map();
+const knownUnits = new Map();
+async function fillArticleSuggestions() {
+  const [catalogue, needs, stock] = await Promise.all([db.getMeta('catalogue', []), db.all('needs'), db.all('stock')]);
+  const items = [...catalogue.flatMap((e) => e.articles ?? []), ...needs, ...stock];
+  knownNames.clear();
+  knownUnits.clear();
+  // La bibliothèque passe en premier : c'est son orthographe qui fait foi.
+  for (const a of items) {
+    const k = articleKey(a.name, '');
+    if (!knownNames.has(k)) knownNames.set(k, a.name.trim());
+    if (a.unit && !knownUnits.has(k)) knownUnits.set(k, a.unit);
+  }
+  $('dl-articles').replaceChildren(...[...knownNames.values()].sort((a, b) => a.localeCompare(b, 'fr')).map((n) => h('option', { value: n })));
+  $('dl-units').replaceChildren(...[...new Set([...DEFAULT_UNITS, ...items.map((a) => a.unit).filter(Boolean)])].map((u) => h('option', { value: u })));
+}
+
+// Formulaire article + quantité + unité. L'unité se remplit seule pour un article connu.
+function articleForm(onAdd, placeholder = 'Article…') {
+  const name = h('input', { class: 'field', placeholder, list: 'dl-articles', autocomplete: 'off', enterkeyhint: 'next' });
+  const qty = h('input', { class: 'field qty', placeholder: 'Qté', inputmode: 'decimal', autocomplete: 'off' });
+  const unit = h('input', { class: 'field unit', placeholder: 'Unité', list: 'dl-units', autocomplete: 'off', enterkeyhint: 'done' });
+  // Article connu : on reprend son orthographe (« plaque ba13 » → « Plaque BA13 ») et son unité.
+  name.addEventListener('change', () => {
+    const k = articleKey(name.value, '');
+    if (knownNames.has(k)) name.value = knownNames.get(k);
+    const u = knownUnits.get(k);
+    if (u && !unit.value) unit.value = u;
+  });
+  return h('form', {
+    class: 'need-form',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      const n = name.value.trim();
+      if (!n) return;
+      await onAdd(n, parseQty(qty.value) ?? 1, unit.value.trim());
+      refresh();
+    },
+  }, name, h('div', { class: 'need-form-row' }, qty, unit, h('button', { type: 'submit', class: 'btn primary', 'aria-label': 'Ajouter' }, '+')));
+}
+
+function lotNeedsSection(lot, needs, catalogue) {
+  const open = needs.filter((n) => !n.boughtAt).length;
+  const bought = needs.length - open;
+  const entry = catalogueEntryOf(lot, catalogue);
+  const library = entry?.articles ?? [];
+  const details = h('details', { class: 'needs', open: ui.openNeeds.has(lot.id) },
+    h('summary', null, `🛒 Courses du lot (${open} à acheter${bought ? ` · ${bought} acheté(s)` : ''})`),
+    needs.length ? h('ul', { class: 'tasks' }, sortNeeds(needs).map(needRow)) : null,
+    entry ? h('button', { type: 'button', class: 'btn block', onclick: () => pickFromLibrary(lot, entry, catalogue, needs) },
+      library.length ? `📚 Choisir dans la bibliothèque (${library.length})` : '📚 Bibliothèque vide : la remplir') : null,
+    articleForm((name, qty, unit) => db.put('needs', newNeed({ roomId: lot.roomId, lotId: lot.id, name, qty, unit })), 'Autre article…'));
+  details.addEventListener('toggle', () => { if (details.open) ui.openNeeds.add(lot.id); else ui.openNeeds.delete(lot.id); });
+  return details;
+}
+
+function needRow(n) {
+  const bought = !!n.boughtAt;
+  return h('li', { class: `task${bought ? ' st-done' : ''}` },
+    h('button', {
+      type: 'button', class: 'check', role: 'checkbox', 'aria-checked': String(bought), 'aria-label': `Acheté : ${n.name}`,
+      onclick: () => updateRecord('needs', n.id, (x) => ({ ...x, boughtAt: x.boughtAt ? null : new Date().toISOString() })),
+    }, h('span', { class: 'box' }, bought ? '✓' : '')),
+    h('button', { type: 'button', class: 'task-main', onclick: () => editNeed(n) },
+      h('span', { class: 'task-title' }, n.name), h('span', { class: 'badge count' }, qtyLabel(n.qty, n.unit))));
+}
+
+async function editNeed(n) {
+  const res = await sheet('Article', (close) => {
+    const name = h('input', { class: 'field', value: n.name, list: 'dl-articles', autocomplete: 'off' });
+    const qty = h('input', { class: 'field', value: formatQty(n.qty), inputmode: 'decimal', autocomplete: 'off' });
+    const unit = h('input', { class: 'field', value: n.unit ?? '', list: 'dl-units', autocomplete: 'off' });
+    const note = h('textarea', { class: 'field', rows: 2, value: n.note ?? '', placeholder: 'Marque, référence, magasin…' });
+    return h('form', {
+      onsubmit: (e) => {
+        e.preventDefault();
+        close({ action: 'save', name: name.value.trim() || n.name, qty: parseQty(qty.value) ?? n.qty, unit: unit.value.trim(), note: note.value });
+      },
+    },
+    h('label', { class: 'lbl' }, 'Article', name),
+    h('div', { class: 'two-cols' }, h('label', { class: 'lbl' }, 'Quantité', qty), h('label', { class: 'lbl' }, 'Unité', unit)),
+    h('label', { class: 'lbl' }, 'Remarque', note),
+    n.boughtAt ? h('p', { class: 'muted small' }, `Acheté le ${formatDate(n.boughtAt)}`) : null,
+    h('div', { class: 'sheet-actions' },
+      h('button', { type: 'button', class: 'btn danger', onclick: () => close({ action: 'delete' }) }, 'Supprimer'),
+      h('button', { type: 'submit', class: 'btn primary' }, 'Enregistrer')));
+  });
+  if (!res) return;
+  if (res.action === 'delete') {
+    await db.saveSnapshot(`Avant suppression de l’article « ${n.name} »`);
+    await db.write([{ store: 'needs', del: n.id }]);
+    toast('Article supprimé');
+    refresh();
+  } else {
+    const { action, ...changes } = res;
+    await updateRecord('needs', n.id, (x) => ({ ...x, ...changes }));
+  }
+}
+
+async function pickFromLibrary(lot, entry, catalogue, needs) {
+  const openKeys = new Set(needs.filter((n) => !n.boughtAt).map((n) => articleKey(n.name, n.unit)));
+  const res = await sheet(`Bibliothèque — ${entry.name}`, (close) => {
+    const rows = entry.articles.map((a) => {
+      const cb = h('input', { type: 'checkbox', class: 'chk' });
+      const qty = h('input', {
+        class: 'field qty', inputmode: 'decimal', autocomplete: 'off', placeholder: 'Qté',
+        value: a.qty != null ? formatQty(a.qty) : '', 'aria-label': `Quantité de ${a.name}`,
+      });
+      qty.addEventListener('input', () => { if (qty.value) cb.checked = true; });
+      const hint = [a.unit || 'sans unité', openKeys.has(articleKey(a.name, a.unit)) ? 'déjà dans la liste' : ''].filter(Boolean).join(' · ');
+      return { a, cb, qty, el: h('div', { class: 'lib-row' }, h('label', { class: 'check-line grow' }, cb, h('span', null, a.name, h('small', { class: 'muted block' }, hint))), qty) };
+    });
+    return [
+      h('p', { class: 'muted' }, entry.articles.length
+        ? `Cochez les articles utiles pour « ${lot.name} » et ajustez les quantités.`
+        : 'Cette bibliothèque est vide. Touchez « Modifier la bibliothèque » pour la remplir.'),
+      rows.map((r) => r.el),
+      h('button', { type: 'button', class: 'btn block', onclick: () => close({ edit: true }) }, '✏️ Modifier la bibliothèque de ce lot'),
+      h('div', { class: 'sheet-actions' },
+        h('button', { type: 'button', class: 'btn', onclick: () => close() }, 'Annuler'),
+        h('button', {
+          type: 'button', class: 'btn primary',
+          onclick: () => close({ add: rows.filter((r) => r.cb.checked).map((r) => ({ ...r.a, qty: parseQty(r.qty.value) ?? 1 })) }),
+        }, 'Ajouter')),
+    ];
+  });
+  if (!res) return;
+  if (res.edit) return editCatalogueEntry(catalogue, catalogue.indexOf(entry));
+  if (!res.add.length) return;
+  await db.write(db.putOps('needs', res.add.map((a) => newNeed({ roomId: lot.roomId, lotId: lot.id, name: a.name, qty: a.qty, unit: a.unit }))));
+  ui.openNeeds.add(lot.id);
+  toast(`${res.add.length} article(s) ajouté(s)`);
+  refresh();
+}
+
+// ---------- Écran Courses (synthèse de toutes les pièces) et stock ----------
+
+async function viewCourses() {
+  const [needs, stock, lots, rooms, catalogue] = await Promise.all([
+    db.all('needs'), db.all('stock'), db.all('lots'), db.all('rooms'), db.getMeta('catalogue', []),
+  ]);
+  fillArticleSuggestions();
+  const lotById = Object.fromEntries(lots.map((l) => [l.id, l]));
+  const roomById = Object.fromEntries(rooms.map((r) => [r.id, r]));
+  const categoryOf = (n) => lotById[n.lotId]?.name ?? n.category ?? 'Divers';
+  const where = (n) => roomById[n.roomId]?.name ?? categoryOf(n);
+  const summary = shoppingSummary(needs, stock, categoryOf);
+  const bought = needs.filter((n) => n.boughtAt).sort((a, b) => b.boughtAt.localeCompare(a.boughtAt));
+  const tab = ui.coursesTab;
+  const tabs = h('div', { class: 'segmented three' }, [
+    ['buy', `À acheter (${summary.filter((a) => a.toBuy > 0).length})`],
+    ['bought', `Achetés (${bought.length})`],
+    ['stock', `Stock (${stock.length})`],
+  ].map(([k, label]) => h('button', {
+    type: 'button', class: 'seg small', 'aria-pressed': String(tab === k), onclick: () => { ui.coursesTab = k; refresh(); },
+  }, label)));
+  let body;
+  if (tab === 'bought') body = boughtView(bought, where);
+  else if (tab === 'stock') body = stockView(stock);
+  else body = buyView(summary, where, catalogue);
+  return { title: 'Courses', nodes: [tabs, body] };
+}
+
+function buyView(summary, where, catalogue) {
+  const groups = groupBy(summary, 'category');
+  const category = h('select', { class: 'field' }, [...new Set([...catalogue.map((e) => e.name), 'Divers'])].map((c) => h('option', { value: c }, c)));
+  category.value = 'Divers';
+  return [
+    summary.length
+      ? [
+        h('button', { class: 'btn primary block', onclick: () => shareShopping(summary) }, '📤 Partager la liste'),
+        h('p', { class: 'muted small' }, 'Synthèse de toutes les pièces, stock déduit. Cochez un article quand il est acheté ; touchez-le pour le détail.'),
+        Object.entries(groups).map(([cat, items]) => h('section', { class: 'card' },
+          h('h2', null, cat),
+          h('ul', { class: 'tasks' }, items.map((a) => articleRow(a, where))))),
+      ]
+      : h('p', { class: 'card muted' }, 'Rien à acheter. Ajoutez des articles depuis les lots des pièces (🛒 Courses du lot), ou ci-dessous.'),
+    h('section', { class: 'card' },
+      h('h2', null, '+ Article hors pièce'),
+      h('p', { class: 'muted small' }, 'Consommables, outillage… tout ce qui ne concerne pas une pièce précise.'),
+      h('label', { class: 'lbl' }, 'Catégorie', category),
+      articleForm((name, qty, unit) => db.put('needs', newNeed({ category: category.value, name, qty, unit })))),
+  ];
+}
+
+function articleRow(a, where) {
+  const covered = a.toBuy === 0;
+  const detail = [
+    a.needs.map((n) => `${where(n)} ${formatQty(n.qty)}`).sort((x, y) => x.localeCompare(y, 'fr')).join(' · '),
+    a.inStock ? `stock ${formatQty(a.inStock)}` : '',
+  ].filter(Boolean).join(' — ');
+  return h('li', { class: `task${covered ? ' covered' : ''}` },
+    h('button', {
+      type: 'button', class: 'check', role: 'checkbox', 'aria-checked': 'false', 'aria-label': `Acheté : ${a.name}`,
+      onclick: () => markBought(a.needs),
+    }, h('span', { class: 'box' })),
+    h('button', { type: 'button', class: 'task-main', onclick: () => articleSheet(a, where) },
+      h('span', { class: 'grow' }, h('span', { class: 'task-title' }, a.name), h('small', { class: 'muted block' }, detail)),
+      h('strong', { class: 'buy-qty' }, covered ? '✓ en stock' : qtyLabel(a.toBuy, a.unit))));
+}
+
+async function markBought(needs) {
+  const now = new Date().toISOString();
+  await db.write(db.putOps('needs', needs.map((n) => ({ ...n, boughtAt: now }))));
+  toast('Acheté ✓ (visible dans « Achetés »)');
+  refresh();
+}
+
+async function articleSheet(a, where) {
+  const stockItems = (await db.all('stock')).filter((s) => articleKey(s.name, s.unit) === a.key);
+  const res = await sheet(a.name, (close) => [
+    h('div', { class: 'kv' }, h('span', null, 'Besoin total'), h('strong', null, qtyLabel(a.needed, a.unit))),
+    h('div', { class: 'kv' }, h('span', null, 'En stock'), h('strong', null, qtyLabel(a.inStock, a.unit))),
+    h('div', { class: 'kv' }, h('span', null, 'À acheter'), h('strong', null, qtyLabel(a.toBuy, a.unit))),
+    h('ul', { class: 'list' }, a.needs.map((n) => h('li', { class: 'row' },
+      h('span', { class: 'grow' }, where(n)),
+      h('strong', null, qtyLabel(n.qty, n.unit)),
+      h('button', { type: 'button', class: 'btn small', onclick: () => close({ edit: n }) }, 'Modifier')))),
+    h('div', { class: 'stack' },
+      h('button', { type: 'button', class: 'btn primary block', onclick: () => close({ bought: true }) }, '✓ Tout marquer comme acheté'),
+      h('button', { type: 'button', class: 'btn block', onclick: () => close({ stock: true }) }, stockItems.length ? '📦 Modifier le stock' : '📦 J’en ai déjà en stock')),
+  ]);
+  if (!res) return;
+  if (res.edit) return editNeed(res.edit);
+  if (res.bought) return markBought(a.needs);
+  if (res.stock) return editStock(stockItems[0] ?? { name: a.name, unit: a.unit, qty: 0, location: '', note: '' });
+}
+
+function boughtView(bought, where) {
+  if (!bought.length) return h('p', { class: 'card muted' }, 'Aucun article acheté pour l’instant.');
+  return [
+    h('section', { class: 'card' },
+      h('p', { class: 'muted small' }, 'Touchez la case pour remettre un article dans la liste à acheter.'),
+      h('ul', { class: 'tasks' }, bought.slice(0, 200).map((n) => h('li', { class: 'task st-done' },
+        h('button', {
+          type: 'button', class: 'check', role: 'checkbox', 'aria-checked': 'true', 'aria-label': `Remettre à acheter : ${n.name}`,
+          onclick: () => updateRecord('needs', n.id, (x) => ({ ...x, boughtAt: null })),
+        }, h('span', { class: 'box' }, '✓')),
+        h('button', { type: 'button', class: 'task-main', onclick: () => editNeed(n) },
+          h('span', { class: 'grow' }, h('span', { class: 'task-title' }, n.name), h('small', { class: 'muted block' }, `${where(n)} · ${formatDate(n.boughtAt)}`)),
+          h('strong', { class: 'buy-qty' }, qtyLabel(n.qty, n.unit))))))),
+    h('button', {
+      class: 'btn block danger',
+      onclick: async () => {
+        const ok = await confirmBox({ title: 'Effacer la liste des achetés ?', message: `${bought.length} article(s). Une copie de sécurité est faite avant.`, ok: 'Effacer', danger: true });
+        if (!ok) return;
+        await db.saveSnapshot('Avant effacement des articles achetés');
+        await db.write(db.delOps('needs', bought));
+        refresh();
+      },
+    }, 'Effacer la liste des achetés'),
+  ];
+}
+
+function stockView(stock) {
+  const sorted = [...stock].sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+  return [
+    h('section', { class: 'card' },
+      h('h2', null, '+ Ajouter au stock'),
+      h('p', { class: 'muted small' }, 'Ce que vous avez déjà (garage, cave…). La liste de courses le déduit automatiquement.'),
+      articleForm(addToStock)),
+    sorted.length
+      ? h('section', { class: 'card' }, h('ul', { class: 'list' }, sorted.map((s) => h('li', { class: 'row' },
+        h('button', { type: 'button', class: 'row-btn grow', onclick: () => editStock(s) },
+          h('span', null, s.name), s.location ? h('small', { class: 'muted' }, `📍 ${s.location}`) : null),
+        toolBtn('−', `Retirer 1 ${s.name}`, () => bumpStock(s, -1)),
+        h('strong', { class: 'stock-qty' }, qtyLabel(s.qty, s.unit)),
+        toolBtn('+', `Ajouter 1 ${s.name}`, () => bumpStock(s, 1))))))
+      : h('p', { class: 'card muted' }, 'Stock vide pour l’instant.'),
+  ];
+}
+
+// Ajoute au stock ; si l'article existe déjà (même nom et unité), on additionne.
+async function addToStock(name, qty, unit) {
+  const existing = (await db.all('stock')).find((s) => articleKey(s.name, s.unit) === articleKey(name, unit));
+  if (existing) await db.put('stock', { ...existing, qty: parseQty(existing.qty + qty), updatedAt: new Date().toISOString() });
+  else await db.put('stock', { id: uid(), name, qty, unit, location: '', note: '', updatedAt: new Date().toISOString() });
+}
+
+async function bumpStock(s, delta) {
+  await updateRecord('stock', s.id, (x) => ({ ...x, qty: Math.max(0, parseQty(x.qty + delta)), updatedAt: new Date().toISOString() }));
+}
+
+async function editStock(item) {
+  const res = await sheet(item.id ? 'Stock' : 'Ajouter au stock', (close) => {
+    const name = h('input', { class: 'field', value: item.name, list: 'dl-articles', autocomplete: 'off' });
+    const qty = h('input', { class: 'field', value: formatQty(item.qty), inputmode: 'decimal', autocomplete: 'off' });
+    const unit = h('input', { class: 'field', value: item.unit ?? '', list: 'dl-units', autocomplete: 'off' });
+    const location = h('input', { class: 'field', value: item.location ?? '', placeholder: 'Garage, cave, camion…', autocomplete: 'off' });
+    const note = h('textarea', { class: 'field', rows: 2, value: item.note ?? '' });
+    return h('form', {
+      onsubmit: (e) => {
+        e.preventDefault();
+        if (!name.value.trim()) return;
+        close({ action: 'save', name: name.value.trim(), qty: parseQty(qty.value) ?? 0, unit: unit.value.trim(), location: location.value.trim(), note: note.value });
+      },
+    },
+    h('label', { class: 'lbl' }, 'Article', name),
+    h('div', { class: 'two-cols' }, h('label', { class: 'lbl' }, 'Quantité', qty), h('label', { class: 'lbl' }, 'Unité', unit)),
+    h('label', { class: 'lbl' }, 'Emplacement', location),
+    h('label', { class: 'lbl' }, 'Remarque', note),
+    h('div', { class: 'sheet-actions' },
+      item.id ? h('button', { type: 'button', class: 'btn danger', onclick: () => close({ action: 'delete' }) }, 'Supprimer') : null,
+      h('button', { type: 'submit', class: 'btn primary' }, 'Enregistrer')));
+  });
+  if (!res) return;
+  if (res.action === 'delete') {
+    await db.saveSnapshot(`Avant suppression du stock « ${item.name} »`);
+    await db.write([{ store: 'stock', del: item.id }]);
+    toast('Retiré du stock');
+  } else {
+    const { action, ...fields } = res;
+    await db.put('stock', { ...item, id: item.id ?? uid(), ...fields, updatedAt: new Date().toISOString() });
+  }
+  refresh();
+}
+
+async function shareShopping(summary) {
+  const text = shoppingText(summary);
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Courses chantier', text });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Liste copiée : collez-la où vous voulez');
+    return;
+  } catch { /* presse-papiers indisponible */ }
+  await sheet('Liste de courses', (close) => [
+    h('textarea', { class: 'field', rows: 12, value: text, readonly: true }),
+    h('button', { class: 'btn block', onclick: () => close() }, 'Fermer'),
+  ]);
 }
 
 // ---------- Écran Galerie ----------
@@ -855,7 +1271,7 @@ async function viewSettings() {
         h('p', { class: 'muted' }, 'Les lots « auto » sont ajoutés à chaque nouvelle pièce. Les autres s’ajoutent à la main depuis une pièce. Les pièces existantes ne sont pas modifiées.'),
         h('ul', { class: 'list' }, catalogue.map((e, i) => h('li', { class: 'row' },
           h('button', { class: 'row-btn grow', onclick: () => editCatalogueEntry(catalogue, i) },
-            h('span', null, e.name), h('small', { class: 'muted' }, `${e.tasks.length} tâche(s) · ${e.auto ? 'auto' : 'à la main'}`)),
+            h('span', null, e.name), h('small', { class: 'muted' }, `${e.tasks.length} tâche(s) · ${e.articles?.length ?? 0} article(s) · ${e.auto ? 'auto' : 'à la main'}`)),
           toolBtn('↑', 'Monter', () => moveCatalogue(catalogue, i, -1)),
           toolBtn('↓', 'Descendre', () => moveCatalogue(catalogue, i, 1))))),
         h('button', { class: 'btn block', onclick: () => editCatalogueEntry(catalogue, -1) }, '+ Nouveau lot / catégorie')),
@@ -976,22 +1392,35 @@ async function emptyTrash() {
 }
 
 async function editCatalogueEntry(catalogue, index) {
-  const entry = index >= 0 ? catalogue[index] : { key: uid(), name: '', auto: false, tasks: [] };
+  const entry = index >= 0 ? catalogue[index] : { key: uid(), name: '', auto: false, tasks: [], articles: [] };
   const res = await sheet(index >= 0 ? 'Modifier le lot' : 'Nouveau lot', (close) => {
     const name = h('input', { class: 'field', value: entry.name, placeholder: 'ex. VMC', autocomplete: 'off' });
     const auto = h('input', { type: 'checkbox', class: 'chk', checked: entry.auto });
     const tasks = h('textarea', { class: 'field', rows: 7, value: entry.tasks.join('\n'), placeholder: 'Une tâche par ligne' });
+    const articles = h('textarea', {
+      class: 'field', rows: 9, value: formatArticles(entry.articles),
+      placeholder: 'Plaque BA13 ; u ; 10\nRail R48 ; u\nVis TTPC 25 ; boîte ; 1',
+    });
     return h('form', {
       onsubmit: (e) => {
         e.preventDefault();
         const n = name.value.trim();
         if (!n) return;
-        close({ action: 'save', entry: { ...entry, name: n, auto: auto.checked, tasks: tasks.value.split('\n').map((s) => s.trim()).filter(Boolean) } });
+        close({
+          action: 'save',
+          entry: {
+            ...entry, name: n, auto: auto.checked,
+            tasks: tasks.value.split('\n').map((s) => s.trim()).filter(Boolean),
+            articles: parseArticles(articles.value),
+          },
+        });
       },
     },
     h('label', { class: 'lbl' }, 'Nom du lot', name),
     h('label', { class: 'check-line' }, auto, 'Ajouter automatiquement aux nouvelles pièces'),
     h('label', { class: 'lbl' }, 'Tâches proposées (une par ligne)', tasks),
+    h('label', { class: 'lbl' }, 'Bibliothèque d’articles (courses)', articles),
+    h('p', { class: 'muted small' }, 'Un article par ligne : « Nom ; unité ; quantité habituelle ». L’unité et la quantité sont facultatives.'),
     h('div', { class: 'sheet-actions' },
       index >= 0 ? h('button', { type: 'button', class: 'btn danger', onclick: () => close({ action: 'delete' }) }, 'Supprimer') : null,
       h('button', { type: 'submit', class: 'btn primary' }, 'Enregistrer')));

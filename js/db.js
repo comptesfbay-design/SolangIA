@@ -2,9 +2,9 @@
 import { DATA_STORES, MEDIA_STORES } from './model.js';
 
 const DB_NAME = 'suivi-chantier';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 const SAFETY_DB = 'suivi-chantier-secours';
-const MAX_SNAPSHOTS = 10;
+const MAX_SNAPSHOTS = 20;
 
 const req = (r) => new Promise((resolve, reject) => {
   r.onsuccess = () => resolve(r.result);
@@ -53,6 +53,13 @@ function upgrade(db, oldVersion) {
     files.createIndex('roomId', 'roomId');
     files.createIndex('deletedAt', 'deletedAt');
     db.createObjectStore('blobs', { keyPath: 'id' });
+  }
+  if (oldVersion < 3) {
+    // needs : articles à acheter (par pièce et par lot, ou « divers ») ; stock : ce qu'on a déjà.
+    const needs = db.createObjectStore('needs', { keyPath: 'id' });
+    needs.createIndex('roomId', 'roomId');
+    needs.createIndex('lotId', 'lotId');
+    db.createObjectStore('stock', { keyPath: 'id' });
   }
 }
 

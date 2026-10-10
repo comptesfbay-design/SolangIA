@@ -99,6 +99,46 @@ Dans le terminal : `npm.cmd test`. Ces tests vérifient :
 
 ---
 
+## Version 0.3.0 — avancement en %, courses et stock
+
+**Avancement en %**
+- Sur chaque tâche ou sous-tâche, choisis **0, 25, 50, 75 ou 100 %**. Deux façons de faire :
+  - un **appui long** sur la tâche ;
+  - dans sa fiche, la ligne « Avancement ».
+- Le statut suit tout seul : 0 % = à faire, de 25 à 75 % = en cours, 100 % = fait.
+- Les barres de la pièce, du niveau et de l'accueil en tiennent compte : une tâche à 50 % compte pour moitié.
+- Une tâche qui a des sous-tâches calcule son avancement à partir d'elles, par exemple « 0/2 · 25 % ».
+
+**Courses par lot**
+- Dans chaque lot d'une pièce, ouvre **🛒 Courses du lot**. Tu peux y ajouter des articles de deux façons :
+  - **📚 Choisir dans la bibliothèque** : coche les articles et ajuste les quantités ;
+  - saisir un article à la main : nom, quantité et unité.
+- Quand tu tapes un article déjà connu, l'app reprend son orthographe et son unité. Ça permet d'additionner correctement les quantités entre pièces.
+
+**Onglet 🛒 Courses**
+- **À acheter** : la synthèse de toutes les pièces, classée par lot, avec le stock déjà déduit. Exemple : « Plaque BA13 : Chambre 1 14 · Séjour 10, stock 5 → **19 u** ».
+  - Coche un article quand il est acheté.
+  - Touche-le pour voir le détail.
+  - **📤 Partager la liste** l'envoie vers Notes, SMS, WhatsApp…
+- **Achetés** : l'historique de tes achats. Touche la case d'un article pour le remettre à acheter.
+- **Stock** : ce que tu as déjà (garage, cave…), avec les boutons − / + pour ajuster vite.
+- Tu peux aussi ajouter un **article hors pièce** (consommables, outillage…).
+
+**Modifier la bibliothèque** : Réglages → Modèle de lots → touche un lot, puis complète le champ « Bibliothèque d'articles ». Écris un article par ligne, sous la forme `Nom ; unité ; quantité habituelle`. L'unité et la quantité sont facultatives. Tu peux aussi y accéder depuis le bouton « ✏️ Modifier la bibliothèque » dans la fenêtre de choix.
+
+### Checklist de test 0.3.0 (sur iPhone)
+
+1. [ ] Mettre à jour : Réglages → Application doit afficher **0.3.0**, et tes données sont toujours là.
+2. [ ] Appui long sur une tâche → **50 %**. Le badge « En cours · 50 % » apparaît et le % de la pièce augmente.
+3. [ ] Dans une pièce → lot Cloisons → **🛒 Courses du lot** → **📚 Choisir dans la bibliothèque** : cocher 2 articles, mettre les quantités, puis toucher **Ajouter**.
+4. [ ] Dans une autre pièce, taper « plaque ba13 » à la main : le nom se corrige tout seul en « Plaque BA13 », avec l'unité « u ».
+5. [ ] Onglet **🛒 Courses** : les deux pièces sont additionnées.
+6. [ ] Onglet Courses → **Stock** : ajouter quelques plaques. La quantité « à acheter » diminue d'autant.
+7. [ ] **📤 Partager la liste** → l'envoyer dans Notes ou par SMS.
+8. [ ] Au magasin, cocher un article acheté : il passe dans « Achetés ».
+
+---
+
 ## Version 0.2.0 (V1) — à tester sur l'iPhone
 
 **Ce qui est fait :**

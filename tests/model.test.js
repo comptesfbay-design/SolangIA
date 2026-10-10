@@ -4,6 +4,8 @@ import {
   DEFAULT_CATALOGUE, progress, moveItem, nextOrder, newTask, newLot, structureForNewRoom,
   setStatus, toggleDone, copyStructure, makeBackup, validateBackup, normalizeBackup, daysSince, backupFileName,
   syncParent, applyStatusChange, parseNotes, fitSize, mediaStats, inPeriod, filePath,
+  setProgress, applyProgressChange, articleKey, parseQty, formatQty, newNeed, shoppingSummary, shoppingText,
+  parseArticles, formatArticles,
 } from '../js/model.js';
 
 const task = (id, status = 'todo', extra = {}) => ({ id, status, parentId: null, ...extra });
@@ -101,7 +103,7 @@ function sampleData() {
   const room = { id: 'R1', levelId: 'L1', name: 'Séjour', order: 0 };
   const lot = { id: 'T1', roomId: 'R1', name: 'Bandes', order: 0 };
   const t = newTask({ lotId: 'T1', roomId: 'R1', title: 'Bandes posées' });
-  return { levels: [level], rooms: [room], lots: [lot], tasks: [t], meta: [{ key: 'seeded', value: true }], photos: [], files: [] };
+  return { levels: [level], rooms: [room], lots: [lot], tasks: [t], meta: [{ key: 'seeded', value: true }], photos: [], files: [], needs: [], stock: [] };
 }
 
 test('sauvegarde : un ancien fichier V0 (format 1, sans photos) reste accepté', () => {
@@ -218,6 +220,107 @@ test('galerie : filtre de dates', () => {
   assert.equal(inPeriod('2026-09-20T12:00:00', '30', now), true);
   assert.equal(inPeriod('2026-09-20T12:00:00', 'm:2026-09', now), true);
   assert.equal(inPeriod('2026-10-01T12:00:00', 'm:2026-09', now), false);
+});
+
+// ---------- Avancement en % ----------
+
+test('avancement en % : une tâche à 50 % compte pour moitié', () => {
+  const tasks = [task('a', 'done'), { ...task('b', 'doing'), progress: 50 }, task('c'), task('d')];
+  assert.deepEqual(progress(tasks), { done: 1, total: 4, pct: 37 });
+  assert.equal(progress([{ ...task('x', 'doing'), progress: 75 }]).pct, 75);
+});
+
+test('avancement en % : le statut suit le pourcentage', () => {
+  const t = newTask({ lotId: 'l', roomId: 'r', title: 'Bandes' });
+  const half = setProgress(t, 50);
+  assert.deepEqual([half.status, half.progress, half.doneAt], ['doing', 50, null]);
+  const full = setProgress(half, 100);
+  assert.equal(full.status, 'done');
+  assert.ok(full.doneAt);
+  assert.deepEqual([setProgress(full, 25).status, setProgress(full, 25).progress], ['doing', 25]);
+  assert.deepEqual([setProgress(half, 0).status, setProgress(half, 0).progress], ['todo', 0]);
+  const blocked = setProgress({ ...t, status: 'blocked' }, 25);
+  assert.deepEqual([blocked.status, blocked.progress], ['blocked', 25]);
+});
+
+test('avancement en % : cocher = 100 %, décocher = 0 %', () => {
+  const t = setProgress(newTask({ lotId: 'l', roomId: 'r', title: 'x' }), 50);
+  assert.equal(setStatus(t, 'done').progress, 100);
+  assert.equal(setStatus(setStatus(t, 'done'), 'todo').progress, 0);
+  assert.equal(setStatus(t, 'blocked').progress, 50);
+});
+
+test('avancement en % sur une sous-tâche : la tâche principale suit', () => {
+  const f = family();
+  const res = applyProgressChange(f.a, f.all, 50);
+  assert.deepEqual(res.map((t) => [t.title, t.status, t.progress]), [['Grain 80', 'doing', 50]]);
+  const all2 = f.all.map((t) => (t.id === f.b.id ? setStatus(t, 'done') : t));
+  const res2 = applyProgressChange(f.a, all2, 100);
+  assert.deepEqual(res2.map((t) => [t.title, t.status]), [['Grain 80', 'done'], ['Ponçage', 'done']]);
+  const merged = f.all.map((t) => setStatus(t, 'done'));
+  assert.equal(progress(merged.slice(0, 3)).pct, 100);
+  assert.equal(progress([merged[0], { ...merged[1], status: 'doing', progress: 50 }, merged[2]]).pct, 75);
+});
+
+// ---------- Courses, stock, bibliothèque ----------
+
+test('courses : quantités saisies à la française', () => {
+  assert.equal(parseQty('2,5'), 2.5);
+  assert.equal(parseQty(' 10 '), 10);
+  assert.equal(parseQty(''), null);
+  assert.equal(parseQty('abc'), null);
+  assert.equal(formatQty(2.5), '2,5');
+  assert.equal(articleKey('Plaque  BA13 ', 'U'), articleKey('plaque ba13', 'u'));
+  assert.equal(articleKey('Câble', 'm'), articleKey('cable', 'm'));
+  assert.notEqual(articleKey('Gaine', 'm'), articleKey('Gaine', 'u'));
+});
+
+test('courses : synthèse de toutes les pièces, stock déduit', () => {
+  const lots = { L1: 'Cloisons / doublages', L2: 'Cloisons / doublages', L3: 'Peinture' };
+  const needs = [
+    newNeed({ roomId: 'R1', lotId: 'L1', name: 'Plaque BA13', qty: 10, unit: 'u' }),
+    newNeed({ roomId: 'R2', lotId: 'L2', name: 'plaque ba13', qty: 14, unit: 'u' }),
+    newNeed({ roomId: 'R1', lotId: 'L3', name: 'Peinture murs', qty: 10, unit: 'L' }),
+    newNeed({ roomId: 'R2', lotId: 'L3', name: 'Rouleau', qty: 1, unit: 'u' }),
+    { ...newNeed({ roomId: 'R2', lotId: 'L3', name: 'Rouleau', qty: 3, unit: 'u' }), boughtAt: '2026-10-09T10:00:00Z' },
+    newNeed({ category: 'Divers', name: 'Sacs à gravats', qty: 20, unit: 'u' }),
+  ];
+  const stock = [{ name: 'Plaque BA13', qty: 4, unit: 'u' }, { name: 'Rouleau', qty: 2, unit: 'u' }];
+  const s = shoppingSummary(needs, stock, (n) => lots[n.lotId] ?? n.category ?? 'Divers');
+  assert.deepEqual(s.map((a) => [a.category, a.name, a.needed, a.inStock, a.toBuy]), [
+    ['Cloisons / doublages', 'Plaque BA13', 24, 4, 20],
+    ['Divers', 'Sacs à gravats', 20, 0, 20],
+    ['Peinture', 'Peinture murs', 10, 0, 10],
+    ['Peinture', 'Rouleau', 1, 2, 0],
+  ]);
+  assert.equal(s[0].needs.length, 2);
+  const text = shoppingText(s, new Date(2026, 9, 10));
+  assert.match(text, /CLOISONS \/ DOUBLAGES\n☐ Plaque BA13 : 20 u/);
+  assert.doesNotMatch(text, /Rouleau/);
+  assert.match(shoppingText([]), /Rien à acheter/);
+});
+
+test('bibliothèque d’articles : texte « Nom ; unité ; quantité » dans les deux sens', () => {
+  const list = parseArticles('Plaque BA13 ; u ; 10\nRail R48;u\n\nVis TTPC 25 ; boîte ; 1,5\nScotch');
+  assert.deepEqual(list, [
+    { name: 'Plaque BA13', unit: 'u', qty: 10 },
+    { name: 'Rail R48', unit: 'u', qty: null },
+    { name: 'Vis TTPC 25', unit: 'boîte', qty: 1.5 },
+    { name: 'Scotch', unit: '', qty: null },
+  ]);
+  assert.equal(formatArticles(list), 'Plaque BA13 ; u ; 10\nRail R48 ; u\nVis TTPC 25 ; boîte ; 1,5\nScotch');
+  assert.deepEqual(parseArticles(formatArticles(list)), list);
+});
+
+test('bibliothèque par défaut : chaque lot a au moins 4 articles', () => {
+  for (const e of DEFAULT_CATALOGUE) assert.ok(e.articles.length >= 4, e.name);
+});
+
+test('sauvegarde : un fichier V1 (format 2, sans courses) reste accepté', () => {
+  const { needs, stock, ...v1data } = sampleData();
+  const old = { ...makeBackup(v1data, '0.2.1'), format: 2 };
+  assert.equal(validateBackup(old).ok, false);
+  assert.deepEqual(validateBackup(normalizeBackup(old)), { ok: true, errors: [] });
 });
 
 test('pièces jointes : nom de fichier sans caractères interdits', () => {
